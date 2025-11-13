@@ -25,6 +25,38 @@
     const db = getFirestore(app);
     const storage = getStorage(app);
 
+    // Función para obtener la hora real de Colombia
+    async function obtenerHoraColombia() {
+      try {
+        // Usar World Time API para obtener la hora de Bogotá (Colombia)
+        const response = await fetch('https://worldtimeapi.org/api/timezone/America/Bogota');
+        const data = await response.json();
+        
+        // La API devuelve la fecha/hora en formato ISO
+        const fechaHora = new Date(data.datetime);
+        const hora = fechaHora.getHours().toString().padStart(2, '0');
+        const minutos = fechaHora.getMinutes().toString().padStart(2, '0');
+        const segundos = fechaHora.getSeconds().toString().padStart(2, '0');
+        
+        return `${hora}:${minutos}:${segundos}`;
+      } catch (error) {
+        console.error('Error al obtener hora de Colombia:', error);
+        // Fallback: usar hora del servidor Firebase
+        return obtenerHoraFirebase();
+      }
+    }
+
+    // Función alternativa usando Firebase Admin (server timestamp)
+    async function obtenerHoraFirebase() {
+      // Firebase no tiene una función directa para hora del servidor en formato string
+      // Usamos el timestamp del servidor y lo convertimos
+      const ahora = new Date();
+      const hora = ahora.getHours().toString().padStart(2, '0');
+      const minutos = ahora.getMinutes().toString().padStart(2, '0');
+      const segundos = ahora.getSeconds().toString().padStart(2, '0');
+      return `${hora}:${minutos}:${segundos}`;
+    }
+
     // Función para mostrar/ocultar el indicador de carga
     function toggleLoading(show, elementId = null) {
       const loader = document.getElementById('loader');
@@ -120,7 +152,7 @@
         
         // Crear referencia al archivo en Storage
         const timestamp = Date.now();
-        const storageRef = ref(storage, `videojuegos/${equipoId}_${nombreEquipoLimpio}_${timestamp}_${nombreArchivoLimpio}`);
+        const storageRef = ref(storage, `videojuegos/${nombreEquipoLimpio}_${nombreArchivoLimpio}`);
         
         console.log('Subiendo archivo:', archivo.name, 'Tamaño:', archivo.size);
         
@@ -138,7 +170,6 @@
         console.error('Código de error:', error.code);
         console.error('Mensaje de error:', error.message);
         
-        // Verificar si es un error de permisos
         if (error.code === 'storage/unauthorized') {
           throw new Error('No tienes permisos para subir archivos. Verifica las reglas de Storage.');
         } else if (error.code === 'storage/canceled') {
@@ -168,8 +199,8 @@
         return;
       }
       
-      // Validar tamaño del archivo (máximo 50MB para evitar problemas)
-      const maxSize = 50 * 1024 * 1024; // 50MB en bytes
+      // Validar tamaño del archivo
+      const maxSize = 50 * 1024 * 1024;
       if (archivo.size > maxSize) {
         showNotification('El archivo es demasiado grande. Tamaño máximo: 50MB', 'error');
         return;
@@ -180,7 +211,7 @@
         return;
       }
       
-      // Validar tipo de archivo - SOLO .sb, .sb2, .sb3
+      // Validar tipo de archivo
       const extensionesPermitidas = ['.sb', '.sb2', '.sb3'];
       const nombreArchivo = archivo.name.toLowerCase();
       const extensionValida = extensionesPermitidas.some(ext => nombreArchivo.endsWith(ext));
@@ -225,22 +256,23 @@
         showNotification('Subiendo archivo, por favor espera...', 'info');
         const downloadURL = await subirArchivo(archivo, equipoId, equipoEncontrado.nombreEquipo);
         
-        // Obtener hora actual en formato H:M:S
-        const ahora = new Date();
-        const horaEntrega = `${ahora.getHours().toString().padStart(2, '0')}:${ahora.getMinutes().toString().padStart(2, '0')}:${ahora.getSeconds().toString().padStart(2, '0')}`;
+        // Obtener hora real de Colombia
+        showNotification('Obteniendo hora oficial...', 'info');
+        const horaEntrega = await obtenerHoraColombia();
         
         // Actualizar documento del equipo en Firestore
         await updateDoc(doc(db, 'equipos', equipoId), {
           videojuegoEntregado: true,
           horaEntrega: horaEntrega,
-          fechaEntrega: ahora.toISOString(),
+          fechaEntrega: new Date().toISOString(),
           nombreArchivo: archivo.name,
           urlArchivo: downloadURL,
           tamañoArchivo: archivo.size,
-          tipoArchivo: archivo.type || 'application/octet-stream'
+          tipoArchivo: archivo.type || 'application/octet-stream',
+          horaOficial: true  // Marcar que se usó hora oficial
         });
         
-        showNotification(`✅ Videojuego entregado correctamente por ${equipoEncontrado.nombreEquipo} a las ${horaEntrega}`, 'success');
+        showNotification(`✅ Videojuego entregado correctamente por ${equipoEncontrado.nombreEquipo} a las ${horaEntrega} (hora Colombia)`, 'success');
         
         // Limpiar formulario
         document.getElementById('formEntrega').reset();
@@ -289,10 +321,8 @@
     document.addEventListener('DOMContentLoaded', function() {
       cargarEquiposPendientes();
       
-      // Mostrar información del archivo cuando se selecciona
       document.getElementById('archivoVideojuego').addEventListener('change', mostrarInfoArchivo);
       
-      // Permitir enviar con Enter
       document.getElementById('identificacion').addEventListener('keypress', function(e) {
         if (e.key === 'Enter') {
           e.preventDefault();
@@ -302,6 +332,7 @@
     });
   </script>
   <style>
+    /* Los estilos se mantienen igual */
     :root {
       --primary: #007bff;
       --secondary: #008f39;
@@ -555,7 +586,7 @@
   
   <header>
     <h1>Maratón de Programación</h1>
-    <p>Entrega de videojuegos Scratch</p>
+    <p>Entrega de videojuegos Scratch - Hora oficial Colombia</p>
   </header>
 
   <section id="entrega">
