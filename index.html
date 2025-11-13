@@ -8,6 +8,7 @@
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
     import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-analytics.js";
     import { getFirestore, collection, getDocs, updateDoc, doc, query, where } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+    import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyBon9MXDAlGb1IPVlvbhTYzMa4QUVl9ftQ",
@@ -22,6 +23,7 @@
     const app = initializeApp(firebaseConfig);
     const analytics = getAnalytics(app);
     const db = getFirestore(app);
+    const storage = getStorage(app);
 
     // Función para mostrar/ocultar el indicador de carga
     function toggleLoading(show, elementId = null) {
@@ -50,7 +52,7 @@
       
       setTimeout(() => {
         notification.style.display = 'none';
-      }, 3000);
+      }, 5000);
     }
 
     // Función para cargar equipos que no han entregado
@@ -61,37 +63,89 @@
         const contenedor = document.getElementById('listaEquipos');
         contenedor.innerHTML = '';
         
-        // Obtener solo equipos que no han entregado
-        const q = query(collection(db, 'equipos'), where("videojuegoEntregado", "==", false));
-        const querySnapshot = await getDocs(q);
+        // Obtener todos los equipos y filtrar los que no han entregado
+        const querySnapshot = await getDocs(collection(db, 'equipos'));
         
         if (querySnapshot.empty) {
-          contenedor.innerHTML = '<p class="empty-state">No hay equipos pendientes por entregar</p>';
+          contenedor.innerHTML = '<p class="empty-state">No hay equipos registrados</p>';
           return;
         }
         
+        let equiposPendientes = 0;
+        
         querySnapshot.forEach((docu) => {
           const data = docu.data();
-          const div = document.createElement('div');
-          div.classList.add('card');
-          div.innerHTML = `
-            <div class="card-header">
-              <h3>${data.nombreEquipo}</h3>
-              <span class="badge ${data.categoria}">${data.categoria}</span>
-            </div>
-            <div class="card-body">
-              <p><strong>Institución:</strong> ${data.institucion}</p>
-              <p><strong>Participantes:</strong> ${data.participantes.map(p => p.nombre).join(', ')}</p>
-              <p><strong>Identificaciones:</strong> ${data.participantes.map(p => p.identificacion).join(', ')}</p>
-            </div>
-          `;
-          contenedor.appendChild(div);
+          // Si no existe la propiedad videojuegoEntregado o es false, mostrar el equipo
+          if (!data.videojuegoEntregado) {
+            equiposPendientes++;
+            const div = document.createElement('div');
+            div.classList.add('card');
+            div.innerHTML = `
+              <div class="card-header">
+                <h3>${data.nombreEquipo}</h3>
+                <span class="badge ${data.categoria}">${data.categoria}</span>
+              </div>
+              <div class="card-body">
+                <p><strong>Institución:</strong> ${data.institucion}</p>
+                <p><strong>Participantes:</strong> ${data.participantes.map(p => p.nombre).join(', ')}</p>
+                <p><strong>Identificaciones:</strong> ${data.participantes.map(p => p.identificacion).join(', ')}</p>
+              </div>
+            `;
+            contenedor.appendChild(div);
+          }
         });
+        
+        if (equiposPendientes === 0) {
+          contenedor.innerHTML = '<p class="empty-state">No hay equipos pendientes por entregar</p>';
+        }
       } catch (error) {
         console.error('Error al cargar equipos:', error);
         showNotification('Error al cargar la lista de equipos', 'error');
       } finally {
         toggleLoading(false);
+      }
+    }
+
+    // Función para limpiar nombre de archivo
+    function limpiarNombreArchivo(nombre) {
+      return nombre.replace(/[^a-zA-Z0-9._-]/g, '_');
+    }
+
+    // Función para subir archivo a Firebase Storage
+    async function subirArchivo(archivo, equipoId, nombreEquipo) {
+      try {
+        // Limpiar nombres para evitar caracteres especiales
+        const nombreEquipoLimpio = limpiarNombreArchivo(nombreEquipo);
+        const nombreArchivoLimpio = limpiarNombreArchivo(archivo.name);
+        
+        // Crear referencia al archivo en Storage
+        const timestamp = Date.now();
+        const storageRef = ref(storage, `videojuegos/${equipoId}_${nombreEquipoLimpio}_${timestamp}_${nombreArchivoLimpio}`);
+        
+        console.log('Subiendo archivo:', archivo.name, 'Tamaño:', archivo.size);
+        
+        // Subir el archivo
+        const snapshot = await uploadBytes(storageRef, archivo);
+        console.log('Archivo subido correctamente:', snapshot);
+        
+        // Obtener la URL de descarga
+        const downloadURL = await getDownloadURL(snapshot.ref);
+        console.log('URL de descarga:', downloadURL);
+        
+        return downloadURL;
+      } catch (error) {
+        console.error('Error detallado al subir archivo:', error);
+        console.error('Código de error:', error.code);
+        console.error('Mensaje de error:', error.message);
+        
+        // Verificar si es un error de permisos
+        if (error.code === 'storage/unauthorized') {
+          throw new Error('No tienes permisos para subir archivos. Verifica las reglas de Storage.');
+        } else if (error.code === 'storage/canceled') {
+          throw new Error('La subida fue cancelada.');
+        } else {
+          throw new Error(`Error al subir el archivo: ${error.message}`);
+        }
       }
     }
 
@@ -114,13 +168,25 @@
         return;
       }
       
-      // Validar tipo de archivo (opcional)
-      const extensionesPermitidas = ['.zip', '.rar', '.7z', '.exe', '.apk', '.html', '.js'];
+      // Validar tamaño del archivo (máximo 50MB para evitar problemas)
+      const maxSize = 50 * 1024 * 1024; // 50MB en bytes
+      if (archivo.size > maxSize) {
+        showNotification('El archivo es demasiado grande. Tamaño máximo: 50MB', 'error');
+        return;
+      }
+      
+      if (archivo.size === 0) {
+        showNotification('El archivo está vacío', 'error');
+        return;
+      }
+      
+      // Validar tipo de archivo - SOLO .sb, .sb2, .sb3
+      const extensionesPermitidas = ['.sb', '.sb2', '.sb3'];
       const nombreArchivo = archivo.name.toLowerCase();
       const extensionValida = extensionesPermitidas.some(ext => nombreArchivo.endsWith(ext));
       
       if (!extensionValida) {
-        showNotification('Tipo de archivo no permitido. Formatos aceptados: ' + extensionesPermitidas.join(', '), 'error');
+        showNotification('Tipo de archivo no permitido. Solo se aceptan archivos Scratch: .sb, .sb2, .sb3', 'error');
         return;
       }
       
@@ -155,41 +221,84 @@
           return;
         }
         
+        // Subir archivo a Firebase Storage
+        showNotification('Subiendo archivo, por favor espera...', 'info');
+        const downloadURL = await subirArchivo(archivo, equipoId, equipoEncontrado.nombreEquipo);
+        
         // Obtener hora actual en formato H:M:S
         const ahora = new Date();
         const horaEntrega = `${ahora.getHours().toString().padStart(2, '0')}:${ahora.getMinutes().toString().padStart(2, '0')}:${ahora.getSeconds().toString().padStart(2, '0')}`;
         
-        // Actualizar documento del equipo
+        // Actualizar documento del equipo en Firestore
         await updateDoc(doc(db, 'equipos', equipoId), {
           videojuegoEntregado: true,
           horaEntrega: horaEntrega,
           fechaEntrega: ahora.toISOString(),
-          nombreArchivo: archivo.name
-          // En una implementación real, aquí subirías el archivo a Firebase Storage
+          nombreArchivo: archivo.name,
+          urlArchivo: downloadURL,
+          tamañoArchivo: archivo.size,
+          tipoArchivo: archivo.type || 'application/octet-stream'
         });
         
-        showNotification(`Videojuego entregado correctamente por ${equipoEncontrado.nombreEquipo} a las ${horaEntrega}`, 'success');
+        showNotification(`✅ Videojuego entregado correctamente por ${equipoEncontrado.nombreEquipo} a las ${horaEntrega}`, 'success');
         
         // Limpiar formulario
         document.getElementById('formEntrega').reset();
+        document.getElementById('infoArchivo').style.display = 'none';
         
         // Actualizar lista de equipos
-        cargarEquiposPendientes();
+        setTimeout(() => {
+          cargarEquiposPendientes();
+        }, 1000);
+        
       } catch (error) {
         console.error('Error al procesar entrega:', error);
-        showNotification('Error al procesar la entrega. Intenta nuevamente.', 'error');
+        showNotification('Error: ' + error.message, 'error');
       } finally {
         toggleLoading(false, 'btnEntregar');
+      }
+    }
+
+    // Mostrar información del archivo seleccionado
+    function mostrarInfoArchivo() {
+      const archivoInput = document.getElementById('archivoVideojuego');
+      const infoArchivo = document.getElementById('infoArchivo');
+      const archivo = archivoInput.files[0];
+      
+      if (archivo) {
+        const tamañoMB = (archivo.size / (1024 * 1024)).toFixed(2);
+        infoArchivo.innerHTML = `
+          <div class="file-info">
+            <strong>Archivo seleccionado:</strong> ${archivo.name}<br>
+            <strong>Tamaño:</strong> ${tamañoMB} MB<br>
+            <strong>Tipo:</strong> ${archivo.type || 'Archivo Scratch'}
+          </div>
+        `;
+        infoArchivo.style.display = 'block';
+      } else {
+        infoArchivo.style.display = 'none';
       }
     }
 
     // Funciones globales
     window.procesarEntrega = procesarEntrega;
     window.cargarEquiposPendientes = cargarEquiposPendientes;
+    window.mostrarInfoArchivo = mostrarInfoArchivo;
 
     // Inicialización
     document.addEventListener('DOMContentLoaded', function() {
       cargarEquiposPendientes();
+      
+      // Mostrar información del archivo cuando se selecciona
+      document.getElementById('archivoVideojuego').addEventListener('change', mostrarInfoArchivo);
+      
+      // Permitir enviar con Enter
+      document.getElementById('identificacion').addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          procesarEntrega();
+        }
+      });
     });
   </script>
   <style>
@@ -287,10 +396,6 @@
       box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1);
     }
     
-    input[type="text"].error, input[type="file"].error {
-      border-color: var(--danger);
-    }
-    
     .btn-primary {
       background: linear-gradient(135deg, var(--primary), #0056b3);
       color: white;
@@ -313,10 +418,6 @@
       box-shadow: 0 6px 12px rgba(0, 123, 255, 0.3);
     }
     
-    .btn-primary:active {
-      transform: translateY(0);
-    }
-    
     .btn-primary:disabled {
       background: var(--gray);
       cursor: not-allowed;
@@ -331,12 +432,6 @@
       box-shadow: 0 3px 10px rgba(0,0,0,0.08);
       margin-bottom: 1.2rem;
       border-left: 4px solid var(--primary);
-      transition: transform 0.3s, box-shadow 0.3s;
-    }
-    
-    .card:hover {
-      transform: translateY(-3px);
-      box-shadow: 0 5px 15px rgba(0,0,0,0.1);
     }
     
     .card-header {
@@ -344,11 +439,6 @@
       justify-content: space-between;
       align-items: center;
       margin-bottom: 1rem;
-    }
-    
-    .card-header h3 {
-      color: var(--dark);
-      font-size: 1.3rem;
     }
     
     .badge {
@@ -369,10 +459,6 @@
       color: var(--success);
     }
     
-    .card-body p {
-      margin-bottom: 0.5rem;
-    }
-    
     .empty-state {
       text-align: center;
       padding: 2rem;
@@ -380,7 +466,19 @@
       font-style: italic;
     }
     
-    /* Loader */
+    .file-info {
+      background-color: var(--light);
+      padding: 1rem;
+      border-radius: 8px;
+      margin-top: 0.5rem;
+      border-left: 4px solid var(--info);
+    }
+    
+    small {
+      color: var(--gray);
+      font-size: 0.875rem;
+    }
+    
     #loader {
       position: fixed;
       top: 0;
@@ -408,7 +506,6 @@
       100% { transform: rotate(360deg); }
     }
     
-    /* Notifications */
     .notification {
       position: fixed;
       top: 20px;
@@ -423,11 +520,6 @@
       animation: slideIn 0.3s ease;
     }
     
-    @keyframes slideIn {
-      from { transform: translateX(100%); opacity: 0; }
-      to { transform: translateX(0); opacity: 1; }
-    }
-    
     .notification.success {
       background: var(--success);
     }
@@ -440,7 +532,6 @@
       background: var(--info);
     }
     
-    /* Responsive */
     @media (max-width: 768px) {
       section {
         margin: 1rem;
@@ -464,11 +555,11 @@
   
   <header>
     <h1>Maratón de Programación</h1>
-    <p>Entrega de videojuegos</p>
+    <p>Entrega de videojuegos Scratch</p>
   </header>
 
   <section id="entrega">
-    <h2>Entrega de Videojuegos</h2>
+    <h2>Entrega de Videojuegos Scratch</h2>
     
     <form id="formEntrega">
       <div class="form-group">
@@ -478,9 +569,10 @@
       </div>
       
       <div class="form-group">
-        <label for="archivoVideojuego">Archivo del videojuego</label>
-        <input type="file" id="archivoVideojuego" accept=".zip,.rar,.7z,.exe,.apk,.html,.js" required />
-        <small>Formatos aceptados: ZIP, RAR, 7Z, EXE, APK, HTML, JS</small>
+        <label for="archivoVideojuego">Archivo del videojuego Scratch</label>
+        <input type="file" id="archivoVideojuego" accept=".sb,.sb2,.sb3" required />
+        <small>Solo se aceptan archivos Scratch: .sb, .sb2, .sb3 (Tamaño máximo: 50MB)</small>
+        <div id="infoArchivo" style="display: none;"></div>
       </div>
       
       <button type="button" class="btn-primary" id="btnEntregar" onclick="procesarEntrega()">
