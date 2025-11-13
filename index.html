@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Entrega de Videojuegos - Maratón de Programación</title>
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { getAnalytics } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-analytics.js";
+    import { getFirestore, collection, getDocs, updateDoc, doc, query, where } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyBon9MXDAlGb1IPVlvbhTYzMa4QUVl9ftQ",
+      authDomain: "lgr0511.firebaseapp.com",
+      projectId: "lgr0511",
+      storageBucket: "lgr0511.appspot.com",
+      messagingSenderId: "53680458999",
+      appId: "1:53680458999:web:57634c03da58af04f017f2",
+      measurementId: "G-2Y35K7LCM8"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const analytics = getAnalytics(app);
+    const db = getFirestore(app);
+
+    // Función para mostrar/ocultar el indicador de carga
+    function toggleLoading(show, elementId = null) {
+      const loader = document.getElementById('loader');
+      if (show) {
+        loader.style.display = 'flex';
+        if (elementId) {
+          const element = document.getElementById(elementId);
+          if (element) element.disabled = true;
+        }
+      } else {
+        loader.style.display = 'none';
+        if (elementId) {
+          const element = document.getElementById(elementId);
+          if (element) element.disabled = false;
+        }
+      }
+    }
+
+    // Función para mostrar notificaciones
+    function showNotification(message, type = 'info') {
+      const notification = document.getElementById('notification');
+      notification.textContent = message;
+      notification.className = `notification ${type}`;
+      notification.style.display = 'block';
+      
+      setTimeout(() => {
+        notification.style.display = 'none';
+      }, 3000);
+    }
+
+    // Función para cargar equipos que no han entregado
+    async function cargarEquiposPendientes() {
+      toggleLoading(true);
+      
+      try {
+        const contenedor = document.getElementById('listaEquipos');
+        contenedor.innerHTML = '';
+        
+        // Obtener solo equipos que no han entregado
+        const q = query(collection(db, 'equipos'), where("videojuegoEntregado", "==", false));
+        const querySnapshot = await getDocs(q);
+        
+        if (querySnapshot.empty) {
+          contenedor.innerHTML = '<p class="empty-state">No hay equipos pendientes por entregar</p>';
+          return;
+        }
+        
+        querySnapshot.forEach((docu) => {
+          const data = docu.data();
+          const div = document.createElement('div');
+          div.classList.add('card');
+          div.innerHTML = `
+            <div class="card-header">
+              <h3>${data.nombreEquipo}</h3>
+              <span class="badge ${data.categoria}">${data.categoria}</span>
+            </div>
+            <div class="card-body">
+              <p><strong>Institución:</strong> ${data.institucion}</p>
+              <p><strong>Participantes:</strong> ${data.participantes.map(p => p.nombre).join(', ')}</p>
+              <p><strong>Identificaciones:</strong> ${data.participantes.map(p => p.identificacion).join(', ')}</p>
+            </div>
+          `;
+          contenedor.appendChild(div);
+        });
+      } catch (error) {
+        console.error('Error al cargar equipos:', error);
+        showNotification('Error al cargar la lista de equipos', 'error');
+      } finally {
+        toggleLoading(false);
+      }
+    }
+
+    // Función para validar y procesar la entrega
+    async function procesarEntrega() {
+      const identificacion = document.getElementById('identificacion').value.trim();
+      const archivoInput = document.getElementById('archivoVideojuego');
+      const archivo = archivoInput.files[0];
+      
+      // Validaciones
+      if (!identificacion) {
+        showNotification('Por favor ingresa un número de identificación', 'error');
+        document.getElementById('identificacion').focus();
+        return;
+      }
+      
+      if (!archivo) {
+        showNotification('Por favor selecciona un archivo para subir', 'error');
+        archivoInput.focus();
+        return;
+      }
+      
+      // Validar tipo de archivo (opcional)
+      const extensionesPermitidas = ['.zip', '.rar', '.7z', '.exe', '.apk', '.html', '.js'];
+      const nombreArchivo = archivo.name.toLowerCase();
+      const extensionValida = extensionesPermitidas.some(ext => nombreArchivo.endsWith(ext));
+      
+      if (!extensionValida) {
+        showNotification('Tipo de archivo no permitido. Formatos aceptados: ' + extensionesPermitidas.join(', '), 'error');
+        return;
+      }
+      
+      toggleLoading(true, 'btnEntregar');
+      
+      try {
+        // Buscar equipo por identificación
+        const equiposSnapshot = await getDocs(collection(db, 'equipos'));
+        let equipoEncontrado = null;
+        let equipoId = null;
+        
+        for (const docu of equiposSnapshot.docs) {
+          const data = docu.data();
+          const participanteConIdentificacion = data.participantes.find(p => p.identificacion === identificacion);
+          
+          if (participanteConIdentificacion) {
+            equipoEncontrado = data;
+            equipoId = docu.id;
+            break;
+          }
+        }
+        
+        if (!equipoEncontrado) {
+          showNotification('No se encontró ningún equipo con ese número de identificación', 'error');
+          toggleLoading(false, 'btnEntregar');
+          return;
+        }
+        
+        if (equipoEncontrado.videojuegoEntregado) {
+          showNotification('Este equipo ya ha entregado su videojuego', 'error');
+          toggleLoading(false, 'btnEntregar');
+          return;
+        }
+        
+        // Obtener hora actual en formato H:M:S
+        const ahora = new Date();
+        const horaEntrega = `${ahora.getHours().toString().padStart(2, '0')}:${ahora.getMinutes().toString().padStart(2, '0')}:${ahora.getSeconds().toString().padStart(2, '0')}`;
+        
+        // Actualizar documento del equipo
+        await updateDoc(doc(db, 'equipos', equipoId), {
+          videojuegoEntregado: true,
+          horaEntrega: horaEntrega,
+          fechaEntrega: ahora.toISOString(),
+          nombreArchivo: archivo.name
+          // En una implementación real, aquí subirías el archivo a Firebase Storage
+        });
+        
+        showNotification(`Videojuego entregado correctamente por ${equipoEncontrado.nombreEquipo} a las ${horaEntrega}`, 'success');
+        
+        // Limpiar formulario
+        document.getElementById('formEntrega').reset();
+        
+        // Actualizar lista de equipos
+        cargarEquiposPendientes();
+      } catch (error) {
+        console.error('Error al procesar entrega:', error);
+        showNotification('Error al procesar la entrega. Intenta nuevamente.', 'error');
+      } finally {
+        toggleLoading(false, 'btnEntregar');
+      }
+    }
+
+    // Funciones globales
+    window.procesarEntrega = procesarEntrega;
+    window.cargarEquiposPendientes = cargarEquiposPendientes;
+
+    // Inicialización
+    document.addEventListener('DOMContentLoaded', function() {
+      cargarEquiposPendientes();
+    });
+  </script>
+  <style>
+    :root {
+      --primary: #007bff;
+      --secondary: #008f39;
+      --success: #28a745;
+      --danger: #dc3545;
+      --warning: #ffc107;
+      --info: #17a2b8;
+      --light: #f8f9fa;
+      --dark: #343a40;
+      --gray: #6c757d;
+      --light-gray: #e9ecef;
+    }
+    
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: #f5f8f6;
+      margin: 0;
+      color: #333;
+      line-height: 1.6;
+    }
+    
+    header {
+      background: linear-gradient(135deg, var(--secondary), var(--primary));
+      color: white;
+      text-align: center;
+      padding: 1.5rem 0;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    
+    header h1 {
+      font-size: 2.2rem;
+      margin-bottom: 0.5rem;
+    }
+    
+    header p {
+      opacity: 0.9;
+      font-size: 1.1rem;
+    }
+    
+    section {
+      max-width: 1100px;
+      margin: 2rem auto;
+      background: white;
+      padding: 2rem;
+      border-radius: 12px;
+      box-shadow: 0 5px 15px rgba(0,0,0,0.08);
+      animation: fadeIn 0.5s ease;
+    }
+    
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    
+    h2 {
+      color: var(--dark);
+      margin-bottom: 1.5rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 2px solid var(--light-gray);
+      font-size: 1.8rem;
+    }
+    
+    .form-group {
+      margin-bottom: 1.5rem;
+    }
+    
+    label {
+      display: block;
+      margin-bottom: 0.5rem;
+      font-weight: 600;
+      color: var(--dark);
+    }
+    
+    input[type="text"], input[type="file"] {
+      width: 100%;
+      padding: 0.8rem 1rem;
+      border-radius: 8px;
+      border: 2px solid var(--light-gray);
+      font-size: 1rem;
+      transition: border-color 0.3s;
+    }
+    
+    input[type="text"]:focus, input[type="file"]:focus {
+      border-color: var(--primary);
+      outline: none;
+      box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1);
+    }
+    
+    input[type="text"].error, input[type="file"].error {
+      border-color: var(--danger);
+    }
+    
+    .btn-primary {
+      background: linear-gradient(135deg, var(--primary), #0056b3);
+      color: white;
+      border: none;
+      padding: 0.8rem 1.8rem;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      font-weight: 600;
+      font-size: 1rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      box-shadow: 0 4px 6px rgba(0, 123, 255, 0.2);
+    }
+    
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 12px rgba(0, 123, 255, 0.3);
+    }
+    
+    .btn-primary:active {
+      transform: translateY(0);
+    }
+    
+    .btn-primary:disabled {
+      background: var(--gray);
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+    
+    .card {
+      background: white;
+      padding: 1.5rem;
+      border-radius: 10px;
+      box-shadow: 0 3px 10px rgba(0,0,0,0.08);
+      margin-bottom: 1.2rem;
+      border-left: 4px solid var(--primary);
+      transition: transform 0.3s, box-shadow 0.3s;
+    }
+    
+    .card:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+    }
+    
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1rem;
+    }
+    
+    .card-header h3 {
+      color: var(--dark);
+      font-size: 1.3rem;
+    }
+    
+    .badge {
+      padding: 0.3rem 0.8rem;
+      border-radius: 50px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    
+    .badge.Senior {
+      background-color: rgba(0, 123, 255, 0.1);
+      color: var(--primary);
+    }
+    
+    .badge.Junior {
+      background-color: rgba(40, 167, 69, 0.1);
+      color: var(--success);
+    }
+    
+    .card-body p {
+      margin-bottom: 0.5rem;
+    }
+    
+    .empty-state {
+      text-align: center;
+      padding: 2rem;
+      color: var(--gray);
+      font-style: italic;
+    }
+    
+    /* Loader */
+    #loader {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(255, 255, 255, 0.8);
+      display: none;
+      justify-content: center;
+      align-items: center;
+      z-index: 9999;
+    }
+    
+    .spinner {
+      width: 50px;
+      height: 50px;
+      border: 5px solid var(--light-gray);
+      border-top: 5px solid var(--primary);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    
+    /* Notifications */
+    .notification {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      padding: 1rem 1.5rem;
+      border-radius: 8px;
+      color: white;
+      font-weight: 600;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      z-index: 1000;
+      display: none;
+      animation: slideIn 0.3s ease;
+    }
+    
+    @keyframes slideIn {
+      from { transform: translateX(100%); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+    
+    .notification.success {
+      background: var(--success);
+    }
+    
+    .notification.error {
+      background: var(--danger);
+    }
+    
+    .notification.info {
+      background: var(--info);
+    }
+    
+    /* Responsive */
+    @media (max-width: 768px) {
+      section {
+        margin: 1rem;
+        padding: 1.5rem;
+      }
+      
+      .card-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.5rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="loader">
+    <div class="spinner"></div>
+  </div>
+  
+  <div id="notification" class="notification"></div>
+  
+  <header>
+    <h1>Maratón de Programación</h1>
+    <p>Entrega de videojuegos</p>
+  </header>
+
+  <section id="entrega">
+    <h2>Entrega de Videojuegos</h2>
+    
+    <form id="formEntrega">
+      <div class="form-group">
+        <label for="identificacion">Número de identificación (contraseña)</label>
+        <input type="text" id="identificacion" placeholder="Ingresa el número de identificación de cualquier participante" required />
+        <small>Usa el número de identificación de cualquier miembro del equipo como contraseña</small>
+      </div>
+      
+      <div class="form-group">
+        <label for="archivoVideojuego">Archivo del videojuego</label>
+        <input type="file" id="archivoVideojuego" accept=".zip,.rar,.7z,.exe,.apk,.html,.js" required />
+        <small>Formatos aceptados: ZIP, RAR, 7Z, EXE, APK, HTML, JS</small>
+      </div>
+      
+      <button type="button" class="btn-primary" id="btnEntregar" onclick="procesarEntrega()">
+        <span>Entregar videojuego</span>
+      </button>
+    </form>
+  </section>
+
+  <section id="equiposPendientes">
+    <h2>Equipos pendientes por entregar</h2>
+    <div id="listaEquipos"></div>
+  </section>
+</body>
+</html>
